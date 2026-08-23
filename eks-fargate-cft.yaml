@@ -1,0 +1,308 @@
+  
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS EKS cluster 
+Parameters:
+   VPC:
+    Type: String
+    Default: vpc-0123456789abcdef0
+    Description: The VPC of your ptoyect
+   PublicSubnet1:
+    Type: String
+    Default: subnet-0123456789abcdef0
+    Description: Enter Public Subnet 1
+   PublicSubnet2:
+    Type: String
+    Default: subnet-0123456789abcdef0
+    Description: Enter Public Subnet 2
+   PublicSubnet3:
+    Type: String
+    Default: subnet-0123456789abcdef0
+    Description: Enter Public Subnet 3
+   PrivateSubnet1:
+    Type: String
+    Default: subnet-0123456789abcdef0
+    Description: Enter Private Subnet 1 
+   PrivateSubnet2:
+    Type: String
+    Default: subnet-0123456789abcdef0
+    Description: Enter Private Subnet 2  
+   PrivateSubnet3:
+    Type: String
+    Default: subnet-0123456789abcdef0
+    Description: Enter Private Subnet 3
+   EKSClusterName:
+    Type: String
+    Description: Name of k8s cluster
+    Default: cluster-eks-exampledemo
+   NumWorkerNodes:
+    Type: Number
+    Description: Number of worker nodes to create
+    Default: 3
+   EKSVersion:
+    Type: String
+    Description: AWS EKS version
+    Default: "1.30"
+   DiskSize:
+    Type: String
+    Description: AWS EKS NodeGroups DiskSize
+    Default: 100
+
+
+
+
+Resources:
+  #============================================================================#
+  # Control plane security group
+  #============================================================================#
+
+  ControlPlaneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the elastic network interfaces between the control plane and the worker nodes
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ControlPlaneSecurityGroup"
+  ControlPlaneIngressFromWorkerNodesHttps:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow incoming HTTPS traffic (TCP/443) from worker nodes (for API server)
+      GroupId: !Ref ControlPlaneSecurityGroup
+      SourceSecurityGroupId: !Ref WorkerNodesSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+      FromPort: 443
+  ControlPlaneEgressToWorkerNodesKubelet:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow outgoing kubelet traffic (TCP/10250) to worker nodes
+      GroupId: !Ref ControlPlaneSecurityGroup
+      DestinationSecurityGroupId: !Ref WorkerNodesSecurityGroup
+      IpProtocol: tcp
+      FromPort: 10250
+      ToPort: 10250
+  ControlPlaneEgressToWorkerNodesHttps:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow outgoing HTTPS traffic (TCP/442) to worker nodes (for pods running extension API servers)
+      GroupId: !Ref ControlPlaneSecurityGroup
+      DestinationSecurityGroupId: !Ref WorkerNodesSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+
+  #============================================================================#
+  # Control plane
+  #============================================================================#
+
+  ControlPlane:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref EKSClusterName
+      Version: !Ref EKSVersion
+      RoleArn: !GetAtt ControlPlaneRole.Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref ControlPlaneSecurityGroup
+        SubnetIds:
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2 
+          - !Ref PublicSubnet3
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2 
+          - !Ref PrivateSubnet3
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true   
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+      Tags:
+        - Key: project
+          Value: EKS-FARGATE-DEMO
+        - Key: costcenter
+          Value: CC
+        - Key: criticality
+          Value: low
+        - Key: createdon
+          Value: currentdate
+        - Key: env
+          Value: dev
+  # Control plane role
+  ControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ControlPlaneRole-CF-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+            Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - arn:aws:iam::aws:policy/AmazonEKSServicePolicy
+ 
+
+  #============================================================================#
+  # Worker nodes security group
+  # Note: default egress rule (allow all traffic to all destinations) applies
+  #============================================================================#
+
+  WorkerNodesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for all the worker nodes
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-WorkerNodesSecurityGroup"
+        - Key: !Sub "kubernetes.io/cluster/${ControlPlane}"
+          Value: "owned"
+  WorkerNodesIngressFromWorkerNodes:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow all incoming traffic from other worker nodes
+      GroupId: !Ref WorkerNodesSecurityGroup
+      SourceSecurityGroupId: !Ref WorkerNodesSecurityGroup
+      IpProtocol: "-1"
+  WorkerNodesIngressFromControlPlaneKubelet:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow incoming kubelet traffic (TCP/10250) from control plane 
+      GroupId: !Ref WorkerNodesSecurityGroup
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      FromPort: 10250
+      ToPort: 10250
+  WorkerNodesIngressFromControlPlaneHttps:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow incoming HTTPS traffic (TCP/443) from control plane (for pods running extension API servers)
+      GroupId: !Ref WorkerNodesSecurityGroup
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443 
+
+#============================================================================#
+# Worker nodes
+# AWS doc: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-eks-nodegroup.html
+#============================================================================#
+
+  WorkerNodesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Effect: Allow
+          Principal:
+            Service:
+              - ec2.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  # IMPORTANT NOTE: We have to define NodeGroup (type: AWS::EKS::Nodegroup), without this no woker nodes will be attach to cluster
+  WorkerNodegroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: ControlPlane
+    Properties:
+      UpdateConfig:
+        MaxUnavailable: 1
+      ClusterName: !Ref EKSClusterName
+      AmiType: AL2_x86_64
+      CapacityType: ON_DEMAND
+      DiskSize: !Ref DiskSize
+      NodegroupName: !Sub "${AWS::StackName}-NodeGroup"
+      NodeRole: !GetAtt WorkerNodesRole.Arn
+      ScalingConfig:
+        MinSize:
+          Ref: NumWorkerNodes
+        DesiredSize:
+          Ref: NumWorkerNodes
+        MaxSize:
+          Ref: NumWorkerNodes
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+
+#============================================================================#
+# Control plane Addon's
+#============================================================================#
+
+  VpcCniAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: ControlPlane
+    Properties:
+      AddonName: vpc-cni
+      AddonVersion: v1.18.1-eksbuild.3
+      ClusterName: !Ref EKSClusterName
+      ResolveConflicts: OVERWRITE
+
+  KubeProxyAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: ControlPlane
+    Properties:
+      AddonName: kube-proxy
+      AddonVersion: v1.30.0-eksbuild.3
+      ClusterName: !Ref EKSClusterName
+      ResolveConflicts: OVERWRITE
+
+  CoreDNSAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: ControlPlane
+    Properties:
+      AddonName: coredns
+      AddonVersion: v1.11.1-eksbuild.8
+      ClusterName: !Ref EKSClusterName
+      ResolveConflicts: OVERWRITE
+
+  CSIDriverAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: ControlPlane
+    Properties:
+      AddonName: aws-ebs-csi-driver
+      AddonVersion: v1.34.0-eksbuild.1
+      ClusterName: !Ref EKSClusterName
+      ResolveConflicts: OVERWRITE
+
+  GuarduttyAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: ControlPlane
+    Properties:
+      AddonName: aws-guardduty-agent
+      AddonVersion: v1.6.1-eksbuild.1
+      ClusterName: !Ref EKSClusterName
+      ResolveConflicts: OVERWRITE
+            
+  CloudwatchAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: ControlPlane
+    Properties:
+      AddonName: amazon-cloudwatch-observability
+      AddonVersion: v2.1.0-eksbuild.1
+      ClusterName: !Ref EKSClusterName
+      ResolveConflicts: OVERWRITE     
+
+
+
+
+
+
+
+
+
+
+
+
+
